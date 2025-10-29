@@ -89,6 +89,8 @@ EthernetInterface::EthernetInterface(
                       config, enabled)
 {}
 
+// EthernetInterface类初始化过程的核心部分，主要负责从系统和配置中加载各种网络接口参数并设置相关DBus属性
+
 EthernetInterface::EthernetInterface(
     stdplus::PinnedRef<sdbusplus::bus_t> bus,
     stdplus::PinnedRef<Manager> manager, const AllIntfInfo& info,
@@ -96,32 +98,51 @@ EthernetInterface::EthernetInterface(
     Ifaces(bus, objPath.c_str(), Ifaces::action::defer_emit), manager(manager),
     bus(bus), objPath(std::move(objPath))
 {
+    // 设置接口名称
     interfaceName(*info.intf.name, true);
+    // 从配置中获取DHCP设置并应用
     auto dhcpVal = getDHCPValue(config);
     EthernetInterfaceIntf::dhcp4(dhcpVal.v4, true);
     EthernetInterfaceIntf::dhcp6(dhcpVal.v6, true);
+    // 配置IPv6路由器通告(RA)接受设置
     EthernetInterfaceIntf::ipv6AcceptRA(getIPv6AcceptRA(config), true);
+    // 设置接口启用状态
     EthernetInterfaceIntf::nicEnabled(enabled, true);
+    
+    // 配置LLDP(链路层发现协议)
     auto lldpVal = parseLLDPConf();
     if (!lldpVal.empty())
     {
         EthernetInterfaceIntf::emitLLDP(lldpVal[interfaceName()], true);
     }
+
+    // 设置NTP服务器列表
     EthernetInterfaceIntf::ntpServers(
         config.map.getValueStrings("Network", "NTP"), true);
 
+    // tips：每个设置函数的第二个参数都设为true，这通常表示延迟发送DBus属性变化信号，以便批量更新后一次性通知客户端
+
+    // 更新接口信息（如MAC地址、MTU等）
     updateInfo(info.intf, true);
 
+    // 配置IPv4默认网关
     if (info.defgw4)
     {
         EthernetInterface::defaultGateway(stdplus::toStr(*info.defgw4), true);
     }
+    // 配置IPv6默认网关
     if (info.defgw6)
     {
         EthernetInterface::defaultGateway6(stdplus::toStr(*info.defgw6), true);
     }
-    emit_object_added();
 
+    // tips：这段代码负责配置接口的状态信息和默认网关，包括IPv4和IPv6两种协议栈。updateInfo函数可能会设置接口的MAC地址、MTU等底层属性
+
+    // 发送DBus对象添加信号，通知客户端该对象已可用
+    // 这行代码是DBus对象生命周期管理的关键部分，它通知DBus系统该以太网接口对象已经创建完成并可以被其他组件访问
+    cemit_object_added();
+
+    // 如果是VLAN接口，创建VLAN配置对象
     if (info.intf.vlan_id)
     {
         if (!info.intf.parent_idx)
@@ -130,21 +151,60 @@ EthernetInterface::EthernetInterface(
         }
         vlan.emplace(bus, this->objPath.c_str(), info.intf, *this);
     }
+
+    // 创建DHCPv4配置对象
+    // 路径格式: /xyz/openbmc_project/network/eth0/dhcp4
+    // 注意这里的路径是基于接口对象路径的
+    // DHCP配置对象允许对DHCP行为进行更精细的控制
+    // 如租约时间、请求选项等
+    // 这体现了DBus对象层次化设计的特点
+    // 通过对象路径的层次结构反映了功能的层次关系
+    // 使客户端能够方便地导航和访问相关配置
+    // 同时也便于权限管理和事件过滤
+    // 创建的对象将作为当前以太网接口的子对象存在
+    // 在DBus对象层次结构中形成父子关系
+    // 这种设计模式在OpenBMC项目中广泛使用
+    // 确保了接口的一致性和可发现性
     dhcp4Conf.emplace(bus, this->objPath + "/dhcp4", *this, DHCPType::v4);
     dhcp6Conf.emplace(bus, this->objPath + "/dhcp6", *this, DHCPType::v6);
+    // 添加所有IP地址
     for (const auto& [_, addr] : info.addrs)
     {
         addAddr(addr);
+        // 为什么没有写入配置文件？
+        // 识别IP地址的获取方式（静态配置、DHCP分配、链路本地地址、SLAAC等）
+        // 创建或更新IP地址对象，将地址信息和来源类型关联起来
+        // 这段代码通常在以下场景被调用：
+
+        // 系统启动时从内核读取当前网络配置
+        // 网络状态发生变化时（如接口启用 / 禁用）
+        // RTNETLINK事件通知网络配置变更
     }
+
+    //
+    // 添加所有静态邻居表条目
     for (const auto& [_, neigh] : info.staticNeighs)
     {
         addStaticNeigh(neigh);
     }
+
+    // 添加所有静态网关
     for (const auto& [_, staticGateway] : info.staticGateways)
     {
         addStaticGateway(staticGateway);
     }
+
+    // tips：这段代码遍历并添加所有预配置的IP地址、静态邻居表条目和静态网关，完成整个接口的初始化过程
 }
+// DBus属性批量更新：所有属性设置都使用true参数延迟发送信号，最后通过emit_object_added()一次性通知，提高了性能
+// 配置与系统状态集成：代码同时从配置文件和系统信息（info变量）中获取数据，确保接口状态与实际系统一致
+
+// 为什么有些配置文件不需要持久化？
+// 在phosphor-networkd中，配置文件写入通常发生在：
+// 用户通过D-Bus API明确修改配置后
+// 接口的启用/禁用状态改变时
+// 静态IP地址被明确添加或删除时
+// 只有静态地址需要写入配置文件，但这通常在显式添加时处理
 
 void EthernetInterface::updateInfo(const InterfaceInfo& info, bool skipSignal)
 {
@@ -774,6 +834,7 @@ static void writeUpdatedTime(const Manager& manager,
     }
 }
 
+// 根据 EthernetInterfaceIntf dbus信息来更新网络接口的配置文件
 void EthernetInterface::writeConfigurationFile()
 {
     config::Parser config;

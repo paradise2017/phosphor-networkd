@@ -41,8 +41,17 @@ static unsigned getIfIdx(const nlmsghdr& hdr, std::string_view data)
     throw std::runtime_error("Unknown nlmsg_type");
 }
 
+// 负责处理 Linux 内核通过 Netlink 协议发送的网络事件通知的核心处理函数
+// 该函数是一个静态回调函数，作为内核网络事件的处理器，接收并解析来自 Linux
+// 内核的 RTNETLINK 消息，然后将这些消息转换为 phosphor-networkd
+// 网络管理系统中的相应操作，它是系统感知和响应底层网络变化的关键组件
 static void handler(Manager& m, const nlmsghdr& hdr, std::string_view data)
 {
+    // 事件分发处理
+    // 函数使用 switch 语句根据消息类型 (hdr.nlmsg_type)
+    // intfFromRtm 解析接口信息
+    // rthandler 辅助函数提取网关信息
+    // neighFromRtm 解析邻居信息并转发给Manager相应方法
     try
     {
         switch (hdr.nlmsg_type)
@@ -93,6 +102,10 @@ static void handler(Manager& m, const nlmsghdr& hdr, std::string_view data)
     }
 }
 
+// 接收内核事件，把ip，等消息传递给handler处理
+// 该函数是一个事件处理回调，当 Netlink 套接字上有数据可读时被调用
+// 它负责从套接字接收数据，解析 Netlink 消息，并将这些消息传递给
+// 主处理函数 handler 进行处理
 static void eventHandler(Manager& m, sdeventplus::source::IO&, int fd, uint32_t)
 {
     auto cb = [&](auto&&... args) {

@@ -46,12 +46,26 @@ static constexpr const char enabledMatch[] =
     "link',interface='org.freedesktop.DBus.Properties',member='"
     "PropertiesChanged',arg0='org.freedesktop.network1.Link',";
 
+// 构造函数接收四个关键参数
+// bus：D-Bus 总线连接引用
+// reload：延迟执行器引用，用于配置重载
+// objPath：D-Bus 对象路径
+// confDir：配置文件目录路径
 Manager::Manager(stdplus::PinnedRef<sdbusplus::bus_t> bus,
                  stdplus::PinnedRef<DelayedExecutor> reload,
                  stdplus::zstring_view objPath,
                  const std::filesystem::path& confDir) :
     ManagerIface(bus, objPath.c_str(), ManagerIface::action::defer_emit),
     reload(reload), bus(bus), objPath(std::string(objPath)), confDir(confDir),
+
+    // D - Bus 信号监听与系统状态同步
+    // 这段代码设置了一个 D-Bus 信号匹配器，用于监听 systemd-network1
+    // 服务中网络接口的 AdministrativeState 管理员状态，属性变化
+
+    // 解析消息获取接口路径和状态值
+    // 从路径中提取接口索引（ifidx） 调用
+    // handleAdminState 方法处理状态变更
+    // 包含异常处理机制，确保单个接口的错误不会影响整体功能
     systemdNetworkdEnabledMatch(
         bus, enabledMatch,
         [man = stdplus::PinnedRef(*this)](sdbusplus::message_t& m) {
@@ -83,6 +97,12 @@ Manager::Manager(stdplus::PinnedRef<sdbusplus::bus_t> bus,
             }
         })
 {
+    // 配置重载回调
+    // 设置了延迟执行器的回调函数，该函数在定时器触发时执行
+    // 执行所有注册的 reloadPreHooks（重载前钩子函数）
+    // 通过 D-Bus 调用 systemd-network1 服务的 Reload 方法，重新加载网络配置
+    // 执行所有注册的 reloadPostHooks（重载后钩子函数）
+    // 每次执行后清理钩子函数列表
     reload.get().setCallback([self = stdplus::PinnedRef(*this)]() {
         for (auto& hook : self.get().reloadPreHooks)
         {
@@ -126,6 +146,11 @@ Manager::Manager(stdplus::PinnedRef<sdbusplus::bus_t> bus,
         }
         self.get().reloadPostHooks.clear();
     });
+
+    // 这段代码负责初始化时获取并处理所有当前网络接口的状态：
+    // 通过 D-Bus调用，ListLinks方法获取所有网络接口列表 对每个接口，构造其
+    //  D-Bus对象路径，调用Get方法获取接口的 AdministrativeState 属性
+    // 调用handleAdminState 方法处理接口状态 忽略 systemd-networkd
     std::vector<
         std::tuple<int32_t, std::string, sdbusplus::message::object_path>>
         links;
@@ -159,11 +184,20 @@ Manager::Manager(stdplus::PinnedRef<sdbusplus::bus_t> bus,
         handleAdminState(std::get<std::string>(val), ifidx);
     }
 
+    // 系统配置初始化
     std::filesystem::create_directories(confDir);
+    // 系统配置config
+    // /xyz/openbmc_project/network
     systemConf = std::make_unique<phosphor::network::SystemConfiguration>(
         bus, (this->objPath / "config").str);
 }
 
+//  主要负责创建或更新以太网接口对象
+//  该方法负责根据提供的网络接口信息（AllIntfInfo结构体）
+//  创建新的以太网接口对象，或更新已存在的接口对象。它是网络管理器初始化和维护网络接口的关键环节
+//  info:
+//  包含了接口的完整信息，如接口基本信息、默认网关、IP地址、静态邻居和静态网关等。
+//  enabled : 表示接口是否启用
 void Manager::createInterface(const AllIntfInfo& info, bool enabled)
 {
     if (ignoredIntf.find(info.intf.idx) != ignoredIntf.end())
@@ -199,23 +233,34 @@ void Manager::createInterface(const AllIntfInfo& info, bool enabled)
                    info.intf.idx);
         return;
     }
+    // 解析该接口对应的配置文件
+    // 创建 EthernetInterface
+    // 对象，传入总线、管理器引用、接口信息、对象路径、配置和启用状态等参数
     config::Parser config(config::pathForIntfConf(confDir, *info.intf.name));
     auto intf = std::make_unique<EthernetInterface>(
         bus, *this, info, objPath.str, config, enabled);
+
+    // 从配置文件中加载DNS服务器和NTP服务器设置
     intf->loadNameServers(config);
     intf->loadNTPServers(config);
+
+    // 接口对象注册
+    // 网络配置持久化与运行时状态管理之间的桥梁
     auto ptr = intf.get();
     interfaces.insert_or_assign(*info.intf.name, std::move(intf));
     interfacesByIdx.insert_or_assign(info.intf.idx, ptr);
 }
 
+// 负责根据接口信息决定是否创建和管理网络接口，并在系统中维护接口状态
 void Manager::addInterface(const InterfaceInfo& info)
 {
+    // 接口类型过滤
     if (info.type != ARPHRD_ETHER)
     {
         ignoredIntf.emplace(info.idx);
         return;
     }
+    // 接口名称过滤
     if (info.name)
     {
         const auto& ignored = internal::getIgnoredInterfaces();
@@ -233,19 +278,25 @@ void Manager::addInterface(const InterfaceInfo& info)
         }
     }
 
+    // 接口信息更新或创建
     auto infoIt = intfInfo.find(info.idx);
     if (infoIt != intfInfo.end())
     {
+        // 找到了接口信息，更新接口信息
         infoIt->second.intf = info;
     }
     else
     {
+        // 未找到接口信息，创建新的接口信息
         infoIt = std::get<0>(intfInfo.emplace(info.idx, AllIntfInfo{info}));
     }
 
+    // 接口创建决策
     if (auto it = systemdNetworkdEnabled.find(info.idx);
         it != systemdNetworkdEnabled.end())
     {
+        // 该接口在 systemdNetworkdEnabled
+        // 映射中，创建以太网接口对象，传入完整的接口信息和启用状态
         createInterface(infoIt->second, it->second);
     }
 }
@@ -505,6 +556,8 @@ void Manager::writeToConfigurationFile()
     }
 }
 
+// 接收网络接口的管理状态字符串和接口索引，根据不同的状态值执行相应的操作，主要用于维护
+// systemd-networkd 与 phosphor-networkd 之间的接口管理状态同步
 void Manager::handleAdminState(std::string_view state, unsigned ifidx)
 {
     if (state == "initialized" || state == "linger")
@@ -517,7 +570,23 @@ void Manager::handleAdminState(std::string_view state, unsigned ifidx)
         systemdNetworkdEnabled.insert_or_assign(ifidx, managed);
         if (auto it = intfInfo.find(ifidx); it != intfInfo.end())
         {
-            createInterface(it->second, managed);
+            if (exist config)
+            {
+                // 修改it->second == AllIntfInfo，根据配置文件
+                // --- 根据配置文件创建接口 ---
+                AllIntfInfo& tmp = it->second;
+                tmp.inf
+                
+                createInterface(it->second, managed);
+                // 写配置重新加载
+                // 如果存在配置文件
+                writeConfigurationFile();
+                reloadConfigs();
+            }
+            else
+            {
+                createInterface(it->second, managed);
+            }
         }
     }
 }

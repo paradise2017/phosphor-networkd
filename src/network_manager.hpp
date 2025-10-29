@@ -101,8 +101,10 @@ class Manager : public ManagerIface
     /** @brief Arms a timer to tell systemd-network to reload all of the network
      * configurations
      */
+    // 触发 systemd-networkd 重新加载配置，配置重载延迟执行系统
     inline void reloadConfigs()
     {
+        // 是触发一个延迟执行器，而不是立即执行配置重载
         reload.get().schedule();
     }
 
@@ -120,6 +122,7 @@ class Manager : public ManagerIface
      *
      *  @param[in] hook - The hook to execute before reloading
      */
+    // 用于注册在配置重载前后执行的钩子函数
     inline void addReloadPreHook(fu2::unique_function<void()>&& hook)
     {
         reloadPreHooks.push_back(std::move(hook));
